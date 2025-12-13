@@ -1,0 +1,159 @@
+---
+- name: Prepare all Kubernetes nodes
+  hosts: all
+  become: yes
+  vars:
+    k8s_major_version: "v1.30"
+    k8s_package_version: "1.30.*"
+  
+  tasks:
+    # --- ЛЕЧЕНИЕ DEBIAN 13 (TESTING) ---
+    
+    # 1. Удаляем не только списки, но и бинарный кэш (*.bin) - это критично для ошибки "corrupted"
+    - name: Deep clean of APT cache
+      shell: |
+        rm -rf /var/lib/apt/lists/*
+        rm -f /var/cache/apt/*.bin
+        rm -rf /etc/apt/sources.list.d/*
+        apt-get clean
+      ignore_errors: yes
+
+    # 2. Обновляем с флагом принудительного GZIP.
+    # Это помогает, когда APT не может распарсить сжатие XZ/ZSTD в Testing ветке.
+    - name: Force APT update with Gzip compression
+      shell: apt-get update -o Acquire::CompressionTypes::Order::=gz
+      register: apt_update_result
+      retries: 3
+      delay: 5
+      until: apt_update_result.rc == 0
+
+    # -----------------------------------
+
+    - name: Disable swap (runtime)
+      command: swapoff -a
+      changed_when: false
+
+    - name: Disable swap (permanent)
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*?\sswap\s+.*)$'
+        replace: '# \1'
+
+    - name: Create modules-load config
+      copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+
+    - name: Load kernel modules
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Configure sysctl params
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/k8s.conf
+        reload: yes
+      loop:
+        - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+
+    - name: Install basic packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - sudo
+        state: present
+        update_cache: no
+
+    # --- DOCKER ---
+    
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes
+
+    # Ставим Docker принудительно от Bookworm (Stable), так как в Trixie часто сломаны зависимости
+    - name: Create Docker repository file manually
+      copy:
+        dest: /etc/apt/sources.list.d/docker.list
+        content: |
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable
+
+    # --- KUBERNETES ---
+
+    - name: Download Kubernetes GPG key
+      shell: |
+        rm -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/{{ k8s_major_version }}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg --yes
+      
+    - name: Create Kubernetes repository file manually
+      copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ k8s_major_version }}/deb/ /
+
+    # --- ФИНАЛ ---
+
+    # Снова используем хак с gzip, чтобы новые репозитории тоже прочитались
+    - name: Final apt update with Gzip
+      shell: apt-get update -o Acquire::CompressionTypes::Order::=gz
+
+    - name: Install containerd
+      apt:
+        name: containerd.io
+        state: present
+
+    - name: Configure containerd
+      shell: |
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+        sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+      notify: Restart containerd
+
+    - name: Install K8s tools
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        allow_downgrade: yes
+
+    - name: Hold Kubernetes packages
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Enable kubelet
+      systemd:
+        name: kubelet
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Restart containerd
+      systemd:
+        name: containerd
+        state: restarted
