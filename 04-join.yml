@@ -17,11 +17,10 @@
 
     # 2. Выполняем команду присоединения
     - name: Join worker to cluster
-      shell: "{{ join_command_file['content'] | b64decode }}"
-      args:
-        # Эта опция говорит Ansible: "Если файл существует, значит задача уже выполнена, пропускаем"
-        creates: /etc/kubernetes/kubelet.conf
-
+    # Добавляем --node-ip, чтобы воркер использовал свой IP из инвентаря Ansible
+    shell: "{{ join_command_file['content'] | b64decode }} --node-ip={{ ansible_host }}"
+    args:
+      creates: /etc/kubernetes/kubelet.conf
     # 3. Ждем появления конфига (значит kubeadm отработал)
     - name: Wait for node to register (kubelet config)
       wait_for:
