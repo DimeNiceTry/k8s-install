@@ -13,9 +13,21 @@
       delegate_to: "{{ master_node }}"
       run_once: yes
 
+    # 1. Принудительно задаем IP для kubelet (через файл настроек)
+    - name: Configure Kubelet Node IP
+      copy:
+        dest: /etc/default/kubelet
+        content: "KUBELET_EXTRA_ARGS=--node-ip={{ ansible_host }}"
+
+    # 2. Перезапускаем kubelet, чтобы он увидел настройку
+    - name: Restart kubelet
+      systemd:
+        name: kubelet
+        state: restarted
+
+    # 3. Теперь выполняем join (БЕЗ лишних флагов)
     - name: Join worker to cluster
-      # ИСПРАВЛЕНИЕ: Добавлено 2 пробела перед shell, чтобы он был внутри задачи
-      shell: "{{ join_command_file['content'] | b64decode }} --node-ip={{ ansible_host }}"
+      shell: "{{ join_command_file['content'] | b64decode }}"
       args:
         creates: /etc/kubernetes/kubelet.conf
 
