@@ -1,8 +1,11 @@
+
 ---
 - name: Initialize Kubernetes cluster on master node
   hosts: k8s_master
   become: yes
   vars:
+    k8s_admin_user: "admin"
+    k8s_admin_home: "/home/admin"
     k8s_version: "1.30.0"
     pod_network_cidr: "10.244.0.0/16"
     k8s_admin_user: "admin"
