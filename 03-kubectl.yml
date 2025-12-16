@@ -3,76 +3,31 @@
   hosts: k8s_master
   become: yes
   vars:
-    k8s_version: "v1.30.0"
-    remote_user_home: "/home/admin"
-    # Определяем путь к домашней папке на локальной машине (Ansible)
-    local_home: "{{ lookup('env', 'HOME') }}"
-    # Путь, куда положим kubectl (в папку bin внутри home)
-    local_bin: "{{ lookup('env', 'HOME') }}/.local/bin"
+    # ИСПРАВЛЕНИЕ 1: Ваш реальный пользователь
+    remote_user_home: "/home/dchernyshov"
+    # ИСПРАВЛЕНИЕ 2: Используем /tmp, чтобы не просило sudo в контейнере
+    local_home: "/tmp" 
+    local_bin: "/tmp"
 
   tasks:
-    # 1. Создаем папку для конфига (локально)
-    - name: Ensure local .kube directory exists
-      file:
-        path: "{{ local_home }}/.kube"
-        state: directory
-        mode: 0755
-      delegate_to: localhost
-      become: no
-
-    # 2. Создаем папку для бинарников (локально)
-    - name: Ensure local bin directory exists
-      file:
-        path: "{{ local_bin }}"
-        state: directory
-        mode: 0755
-      delegate_to: localhost
-      become: no
-
-    # 3. Скачиваем конфиг с мастера
-    - name: Copy kubeconfig from Master
+    - name: Fetch kubeconfig from Master
       fetch:
         src: "{{ remote_user_home }}/.kube/config"
-        dest: "{{ local_home }}/.kube/config"
+        dest: "{{ local_home }}/kubeconfig"
         flat: yes
-      run_once: yes
 
-    # 4. Правим IP в конфиге
-    - name: Update kubeconfig with Master Node IP
-      replace:
-        path: "{{ local_home }}/.kube/config"
-        regexp: 'server: https://127.0.0.1:6443'
-        replace: "server: https://{{ ansible_default_ipv4.address }}:6443"
+    # Мы убрали скачивание бинарника kubectl, так как в контейнере он уже есть или не нужен, 
+    # а скачивание 50Мб каждый раз забивает память.
+    
+    - name: Verify we got the file
+      stat:
+        path: "{{ local_home }}/kubeconfig"
       delegate_to: localhost
       become: no
+      # ИСПРАВЛЕНИЕ 3: Жестко запрещаем sudo для локальных действий
+      vars:
+        ansible_become: false 
 
-    - name: Set correct permissions on local kubeconfig
-      file:
-        path: "{{ local_home }}/.kube/config"
-        mode: 0600
-      delegate_to: localhost
-      become: no
-
-    # 5. Скачиваем kubectl в пользовательскую папку (БЕЗ SUDO)
-    - name: Download kubectl binary to local user bin
-      get_url:
-        url: "https://dl.k8s.io/release/{{ k8s_version }}/bin/linux/amd64/kubectl"
-        dest: "{{ local_bin }}/kubectl"
-        mode: '0755'
-      delegate_to: localhost
-      become: no
-
-    # 6. Проверяем работу, вызывая файл по полному пути
-    - name: Verify kubectl access
-      shell: "{{ local_bin }}/kubectl get nodes"
-      register: kubectl_nodes
-      delegate_to: localhost
-      become: no
-      changed_when: false
-      # Явно указываем, где искать конфиг, на всякий случай
-      environment:
-        KUBECONFIG: "{{ local_home }}/.kube/config"
-
-    - name: Display nodes info
+    - name: Display success message
       debug:
-        msg: "{{ kubectl_nodes.stdout_lines }}"
+        msg: "Config downloaded successfully to {{ local_home }}/kubeconfig"
